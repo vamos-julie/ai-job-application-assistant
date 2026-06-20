@@ -2,6 +2,14 @@
 
 AI-assisted workflow for evidence-based job application analysis.
 
+## Live Demo
+
+Live app: https://ai-job-application-assistant.streamlit.app/
+
+The public demo mode is available without a password and does not use the OpenAI API.
+
+Live analysis is password-protected to control API usage.
+
 This Streamlit app compares a job description with a CV and helps structure an application decision. It separates direct evidence from adjacent evidence, identifies gaps and risky claims, and generates tailored application materials for manual review.
 
 ## What the app does
