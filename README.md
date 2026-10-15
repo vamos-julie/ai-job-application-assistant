@@ -8,7 +8,7 @@ Live app: https://ai-job-application-assistant.streamlit.app/
 
 The public demo mode is available without a password and does not use the OpenAI API.
 
-Live analysis is password-protected to control API usage.
+Public Live analysis is available without a password, with 5 successful analyses per day shared across all visitors. Optional passwords unlock guest or owner access.
 
 This Streamlit app compares a job description with a CV and helps structure an application decision. It separates direct evidence from adjacent evidence, identifies gaps and risky claims, and generates tailored application materials for manual review.
 
@@ -37,13 +37,18 @@ It uses rules such as:
 
 ## Access model
 
-The app has three access levels:
+The app has four access modes:
 
 - Public demo mode: no password, no API calls, no API cost.
-- Guest live mode: password-protected, limited by daily guest quota.
-- Owner live mode: password-protected, unlimited live runs.
+- Public live mode: no password, 5 successful analyses per day shared across all visitors.
+- Guest live mode: `GUEST_PASSWORD`, 18 successful analyses per day shared across guests.
+- Owner live mode: `OWNER_PASSWORD`, no application-level daily limit.
 
-The guest quota uses local JSON storage and is intended as demo-level cost control, not production-grade abuse prevention.
+Public and guest counters are independent and stored in `.usage/public_usage.json` and `.usage/guest_usage.json`. Daily allowances reset using `Asia/Nicosia`. Only successful, non-empty responses count; owner requests consume neither pool. Password access remains available when a quota is exhausted.
+
+These local JSON files are ephemeral on Streamlit Community Cloud and may reset after restarts. Concurrent requests can race and exceed the allowance. This portfolio MVP quota is not a guaranteed hard spending limit.
+
+Please remove confidential or sensitive personal information before submitting. Live text is processed using the OpenAI API.
 
 ## Tech stack
 
@@ -73,6 +78,17 @@ Add your secrets to .streamlit/secrets.toml:
 Run the app:
 
     streamlit run app.py
+
+## Offline validation (no OpenAI credits)
+
+From the project directory, with dependencies installed, run:
+
+    python -m py_compile app.py tests/test_public_live.py
+    python -m unittest discover -s tests -v
+
+The tests run the real Streamlit UI with `AppTest`, replace the OpenAI client with mocked responses before loading the app, inject fake secrets, and redirect both usage files to a temporary directory. They never read or change your secrets file, modify real usage counters, or call the OpenAI API. Do not click Run live analysis in the normal app when testing without credits; that uses the real API.
+
+Tests cover Demo mode, all five public analysis types, shared public usage, independent quotas, exhaustion with password upgrades, guest/owner session persistence across mode switches, input validation, empty responses, API errors, day resets, unknown access handling, and Markdown download availability after exhaustion.
 
 ## Deployment
 

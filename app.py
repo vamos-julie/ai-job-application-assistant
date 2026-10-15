@@ -25,11 +25,18 @@ MAX_JD_CHARS = 12000
 MAX_CV_CHARS = 10000
 
 
+PUBLIC_DAILY_LIMIT = 5
 GUEST_DAILY_LIMIT = 18
 APP_TIMEZONE = "Asia/Nicosia"
 
 USAGE_DIR = Path(".usage")
 USAGE_FILE = USAGE_DIR / "guest_usage.json"
+PUBLIC_USAGE_FILE = USAGE_DIR / "public_usage.json"
+
+PUBLIC_LIMIT_MESSAGE = (
+    "Today's free live analysis limit has been reached. You can still explore "
+    "Demo mode or unlock additional access with a password."
+)
 
 
 def get_today_key() -> str:
@@ -37,26 +44,41 @@ def get_today_key() -> str:
     return datetime.now(ZoneInfo(APP_TIMEZONE)).date().isoformat()
 
 
-def load_guest_usage() -> dict:
-    """Load guest usage from a local JSON file.
-
-    This is demo-level quota tracking. It is sufficient for a portfolio demo,
-    but not production-grade persistent storage.
-    """
+def load_usage(usage_file: Path) -> dict:
+    """Load portfolio MVP counters; ephemeral storage is not a hard spending limit."""
     try:
-        if not USAGE_FILE.exists():
-            return {}
-        with USAGE_FILE.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+        with usage_file.open("r", encoding="utf-8") as f:
+            usage = json.load(f)
+        return usage if isinstance(usage, dict) else {}
+    except (OSError, ValueError):
         return {}
 
 
-def save_guest_usage(usage: dict) -> None:
-    """Save guest usage to a local JSON file."""
-    USAGE_DIR.mkdir(parents=True, exist_ok=True)
-    with USAGE_FILE.open("w", encoding="utf-8") as f:
+def save_usage(usage_file: Path, usage: dict) -> None:
+    """Save counters locally; concurrent requests can race on read/write."""
+    usage_file.parent.mkdir(parents=True, exist_ok=True)
+    with usage_file.open("w", encoding="utf-8") as f:
         json.dump(usage, f, indent=2)
+
+
+def load_guest_usage() -> dict:
+    return load_usage(USAGE_FILE)
+
+
+def save_guest_usage(usage: dict) -> None:
+    save_usage(USAGE_FILE, usage)
+
+
+def get_public_remaining_runs() -> int:
+    used = int(load_usage(PUBLIC_USAGE_FILE).get(get_today_key(), 0))
+    return max(PUBLIC_DAILY_LIMIT - used, 0)
+
+
+def increment_public_usage() -> None:
+    usage = load_usage(PUBLIC_USAGE_FILE)
+    today = get_today_key()
+    usage[today] = int(usage.get(today, 0)) + 1
+    save_usage(PUBLIC_USAGE_FILE, usage)
 
 
 def get_guest_usage_today() -> int:
@@ -305,7 +327,7 @@ def render_mode_cards() -> None:
 <div class="info-card">
     <div class="info-card-title">Live analysis</div>
     <div class="info-card-text">
-        Paste your own CV and job description. Password required. Guest access has a daily limit.
+        Paste your own CV and job description. Try 5 shared free analyses daily, or unlock additional access with a password.
     </div>
 </div>
 """,
@@ -643,47 +665,62 @@ def initialize_session_state() -> None:
         st.session_state.last_live_output = None
 
 
-def render_access_panel() -> Optional[str]:
-    """Render password access panel and return access level: owner, guest, or None."""
+def render_access_panel() -> str:
+    """Return session-based owner/guest access, or password-free public access."""
     initialize_session_state()
-
     current_access = st.session_state.get("access_level")
+    st.markdown("### Live access")
 
     if current_access == "owner":
-        st.success("Owner access unlocked. Live analysis is unlimited.")
+        st.success("Owner access unlocked. No application-level daily limit.")
         return "owner"
 
     if current_access == "guest":
         used = get_guest_usage_today()
         remaining = get_guest_remaining_runs()
         st.info(f"Guest access unlocked. Daily guest usage: {used} / {GUEST_DAILY_LIMIT}. Remaining today: {remaining}.")
-        return "guest"
+        if remaining <= 0:
+            st.warning("Daily guest limit reached. Please contact the app owner for additional access.")
+    else:
+        remaining = get_public_remaining_runs()
+        st.info(f"Free live analyses remaining today: {remaining} / {PUBLIC_DAILY_LIMIT}. Shared across all visitors.")
+        if remaining <= 0:
+            st.warning(PUBLIC_LIMIT_MESSAGE)
 
-    st.markdown("### Live access")
-    st.caption("Live analysis uses the OpenAI API and requires a password.")
+    with st.expander("Have an access password? Unlock additional analyses"):
+        with st.form("access_form"):
+            password = st.text_input("Enter password", type="password")
+            submitted = st.form_submit_button("Unlock live analysis")
 
-    with st.form("access_form"):
-        password = st.text_input("Enter password", type="password")
-        submitted = st.form_submit_button("Unlock live analysis")
+        if submitted:
+            owner_password = st.secrets.get("OWNER_PASSWORD", "")
+            guest_password = st.secrets.get("GUEST_PASSWORD", "")
 
-    if submitted:
-        owner_password = st.secrets.get("OWNER_PASSWORD", "")
-        guest_password = st.secrets.get("GUEST_PASSWORD", "")
+            if password and password == owner_password:
+                st.session_state.access_level = "owner"
+                st.rerun()
+            elif password and password == guest_password:
+                st.session_state.access_level = "guest"
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
 
-        if password and password == owner_password:
-            st.session_state.access_level = "owner"
-            st.success("Owner access unlocked.")
-            st.rerun()
+    return "guest" if current_access == "guest" else "public"
 
-        elif password and password == guest_password:
-            st.session_state.access_level = "guest"
-            st.success("Guest access unlocked.")
-            st.rerun()
 
-        else:
-            st.error("Incorrect password.")
-
-    return None
+def check_live_quota_before_run(access_level: str) -> bool:
+    """Explicitly gate every live access level immediately before a request."""
+    if access_level == "owner":
+        return True
+    if access_level == "guest":
+        return check_guest_quota_before_run()
+    if access_level == "public":
+        if get_public_remaining_runs() > 0:
+            return True
+        st.warning(PUBLIC_LIMIT_MESSAGE)
+        return False
+    st.error("Unknown live access level. Please reload the app.")
+    return False
 
 
 def check_guest_quota_before_run() -> bool:
@@ -987,9 +1024,6 @@ def render_analysis_type_description(analysis_type: str) -> None:
 @st.cache_resource
 def get_openai_client() -> OpenAI:
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
-
-client = get_openai_client()
 
 
 # -------------------------------------------------
@@ -1852,14 +1886,14 @@ def analyze_application(jd_text: str, cv_text: str, analysis_type: str) -> str:
     """Run the live OpenAI analysis and return markdown output."""
     prompt = build_prompt(jd_text, cv_text, analysis_type)
 
-    response = client.responses.create(
+    response = get_openai_client().responses.create(
         model=MODEL_NAME,
         input=prompt,
     )
 
     output_text = getattr(response, "output_text", None)
 
-    if not output_text:
+    if not isinstance(output_text, str) or not output_text.strip():
         raise ValueError("OpenAI returned an empty response.")
 
     return output_text
@@ -1886,17 +1920,12 @@ if app_mode == "Demo mode":
 else:
     access_level = render_access_panel()
 
-    if access_level is None:
-        st.stop()
-
-    # Stop guest users early if the daily quota is already exhausted.
-    # We also check again before the API call as a safety check.
-    if access_level == "guest" and get_guest_remaining_runs() <= 0:
-        st.error("Daily guest limit reached. Please contact the app owner for additional access.")
-        st.stop()
-
     st.markdown("## Live analysis")
     st.caption("Paste a job description and CV. Live analysis uses the OpenAI API.")
+    st.caption(
+        "Please remove confidential or sensitive personal information before submitting. "
+        "Text is processed using the OpenAI API."
+    )
 
     analysis_type = st.selectbox(
         "Analysis type",
@@ -1927,7 +1956,11 @@ else:
             placeholder="Paste the CV here...",
         )
 
-    run_button = st.button("Run live analysis")
+    quota_exhausted = (
+        (access_level == "public" and get_public_remaining_runs() <= 0)
+        or (access_level == "guest" and get_guest_remaining_runs() <= 0)
+    )
+    run_button = st.button("Run live analysis", disabled=quota_exhausted)
 
     if run_button:
         if not jd_text.strip() or not cv_text.strip():
@@ -1949,23 +1982,24 @@ else:
             st.stop()
 
         # Safety check immediately before the API call.
-        if access_level == "guest" and not check_guest_quota_before_run():
+        if not check_live_quota_before_run(access_level):
             st.stop()
 
         try:
             with st.spinner("Running evidence-based analysis..."):
                 output_text = analyze_application(jd_text, cv_text, analysis_type)
 
-            # Increment guest usage only after a successful API response.
-            if access_level == "guest":
+            # Count only successful, non-empty responses in the matching pool.
+            if access_level == "public":
+                increment_public_usage()
+            elif access_level == "guest":
                 increment_guest_usage()
 
             st.session_state.last_live_output = output_text
-            render_analysis_output(output_text)
+            st.rerun()
 
-        except Exception as e:
-            st.error("Something went wrong while calling the OpenAI API.")
-            st.exception(e)
+        except Exception:
+            st.error("The analysis could not be completed. Please try again later.")
 
-    elif st.session_state.last_live_output:
+    if st.session_state.last_live_output:
         render_analysis_output(st.session_state.last_live_output)
